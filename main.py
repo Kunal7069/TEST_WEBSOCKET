@@ -60,7 +60,7 @@ import asyncio
 app = FastAPI()
 
 active_connections: Dict[str, WebSocket] = {}
-pending_responses: Dict[str, asyncio.Queue] = {}
+pending_futures: Dict[str, asyncio.Future] = {}
 
 
 @app.websocket("/ws/{client_id}")
@@ -68,7 +68,6 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     """Handle incoming WebSocket connection from a client"""
     await websocket.accept()
     active_connections[client_id] = websocket
-    pending_responses[client_id] = asyncio.Queue()
     print(f"✅ Client {client_id} connected")
 
     try:
@@ -83,13 +82,18 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 pass
 
             print(f"📩 Message from {client_id}: {data}")
-            await pending_responses[client_id].put(data)
+
+            # If there is a pending future waiting for this response, set it
+            fut = pending_futures.pop(client_id, None)
+            if fut and not fut.done():
+                fut.set_result(data)
+
     except Exception as e:
         print(f"❌ Client {client_id} disconnected: {e}")
     finally:
         # Cleanup on disconnect
         active_connections.pop(client_id, None)
-        pending_responses.pop(client_id, None)
+        pending_futures.pop(client_id, None)
 
 
 @app.post("/ws_call/{client_id}")
@@ -101,15 +105,20 @@ async def ws_call(client_id: str, payload: dict):
     if not ws:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not connected")
 
+    # Create a future to wait for the response
+    fut = asyncio.get_event_loop().create_future()
+    pending_futures[client_id] = fut
+
     # Send the command to the client
     await ws.send_text(json.dumps(payload))
     print(f"📤 Sent to {client_id}: {payload}")
 
     try:
-        # Wait for the client to send the next message
-        response = await asyncio.wait_for(ws.receive_text(), timeout=30)
+        # Wait for the client to send the response
+        response = await asyncio.wait_for(fut, timeout=30)
         return {"client_id": client_id, "result": json.loads(response)}
     except asyncio.TimeoutError:
+        pending_futures.pop(client_id, None)
         raise HTTPException(status_code=504, detail="Timeout waiting for response")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error receiving response: {str(e)}")
@@ -127,8 +136,8 @@ async def ping_clients():
                 print(f"❌ Ping failed for {client_id}: {e}")
                 # Cleanup failed connection
                 active_connections.pop(client_id, None)
-                pending_responses.pop(client_id, None)
-        await asyncio.sleep(15)  # ping every 15 seconds
+                pending_futures.pop(client_id, None)
+        await asyncio.sleep(15)
 
 
 @app.on_event("startup")
@@ -136,3 +145,4 @@ async def startup_event():
     # Start background ping task
     asyncio.create_task(ping_clients())
     print("🚀 Central server started and ping task running")
+
