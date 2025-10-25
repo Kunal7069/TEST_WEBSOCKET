@@ -95,27 +95,24 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 @app.post("/ws_call/{client_id}")
 async def ws_call(client_id: str, payload: dict):
     """
-    Send a WebSocket API call command to the client and wait for response.
-    Example payload:
-    {
-      "method": "GET",
-      "endpoint": "/test_api",
-      "body": {}
-    }
+    Send a WebSocket API call command to the client and wait for immediate response.
     """
     ws = active_connections.get(client_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Client {client_id} not connected")
 
+    # Send the command to the client
     await ws.send_text(json.dumps(payload))
     print(f"📤 Sent to {client_id}: {payload}")
 
     try:
-        # Wait for response from the client
-        response = await asyncio.wait_for(pending_responses[client_id].get(), timeout=30)
+        # Wait for the client to send the next message
+        response = await asyncio.wait_for(ws.receive_text(), timeout=30)
         return {"client_id": client_id, "result": json.loads(response)}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Timeout waiting for response")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error receiving response: {str(e)}")
 
 
 # -----------------------------
